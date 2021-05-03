@@ -51,8 +51,8 @@ function genSyl(compat: string[], stress: boolean, delay: boolean): [string, str
   return [(stress ? "'" : '') + (delay ? 'h' : '') + core, next];
 }
 
-function genWord() {
-  const l = Math.floor(Math.random() * 4) + 1;
+function genWord(syl_count: number) {
+  const l = Math.floor(Math.random() * syl_count) + 1;
   const s = Math.floor(Math.random() * l);
   let [syl, next] = genSyl(all, s === 0, Math.random() > 0.5);
   const syls = [syl];
@@ -64,7 +64,8 @@ function genWord() {
 }
 
 const words = [];
+const syl_count = parseInt(process.argv[3]);
 for (let i = parseInt(process.argv[2]); i >= 0; i--) {
-  words.push(genWord());
+  words.push(genWord(syl_count));
 }
 console.log(words.join(' '));
