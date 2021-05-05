@@ -4,6 +4,7 @@ import WavEncoder from 'wav-encoder';
 type SylInfo = {
   v_delay: boolean;
   stress: boolean;
+  geminate: boolean;
   type: 1|2|3|4;
   epenthetic: 'a'|'o'|'u'|'i'|'e'|'';
   C: 'z'|'x'|'b'|'d'|'g'|'v';
@@ -24,24 +25,12 @@ d, t, n -> oi
 v, f, y -> ui
 */
 const cmap = {
-  l: 'z',
-  r: 'x',
-  m: 'b',
-  w: 'g',
-  n: 'd',
-  y: 'v',
-  s: 'z',
-  c: 'x',
-  p: 'b',
-  k: 'g',
-  t: 'd',
-  f: 'v',
-  z: 'z',
-  x: 'x',
-  b: 'b',
-  g: 'g',
-  d: 'd',
-  v: 'v',
+  z: 'z', s: 'z', l: 'z',
+  x: 'x', c: 'x', r: 'x',
+  b: 'b', p: 'b', m: 'b',
+  g: 'g', k: 'g', w: 'g',
+  d: 'd', t: 'd', n: 'd',
+  v: 'v', f: 'v', y: 'v', 
 };
 
 const smplr = /[lrmwny]/g;
@@ -49,7 +38,7 @@ const cvcdr = /[zxbgdv]/g;
 const cdvcr = /[scpktf]/g;
 const cnsr = /[lrmwnyscpktfzxbgdv]/g;
 const vwlr = /[aoui]/g;
-const sylr = /'?h?(?:[lrmwny][aoui]?|[scpktfzxbgdv][aoui])/g;
+const sylr = /'?h?(?:[lrmwny]e?[aoui]?|[scpktfzxbgdv]e?[aoui])/g;
 const syls: SylInfo[] = process.argv.slice(2)
   .flatMap(s => [...s.matchAll(sylr)]
     .map(z => {  
@@ -61,6 +50,7 @@ const syls: SylInfo[] = process.argv.slice(2)
       const syl = z[0];
         
       const v_delay = syl.includes('h');
+      const geminate = syl.includes('e');
       const stress = syl.includes("'");
       const cmatch = (cnsr.exec(syl) as RegExpExecArray)[0];
       const C: any = cmap[cmatch as keyof typeof cmap];
@@ -71,20 +61,12 @@ const syls: SylInfo[] = process.argv.slice(2)
 
       return {
         epenthetic: '',
-        v_delay, stress,
-        type, C, V,
+        v_delay, geminate,
+        stress, type, C, V,
       };
     })
   );
 
-/*
-z, s, l -> ao
-x, c, r -> au
-b, p, m -> ai
-g, k, w -> ou
-d, t, n -> oi
-v, f, y -> ui
-*/
 function epenthetic(s1: string, s2: string) {
   if (s1 === s2) return '';
   switch(s1) {
@@ -114,37 +96,42 @@ for (let i = 0; i < sl; i++) {
   syl.epenthetic = epenthetic(syl.V || syl.C, syls[i+1].C);
 }
 
-const len = syls.reduce((acc, syl) => {
-  acc += syl.v_delay ? 2 : 0;
-  acc += syl.epenthetic ? 1 : 0
-  return acc + 6;
-}, 0);
-
 // 8 chunks = 1/5 of a second
 // 40 chunks per second
 
 const sampleRate = 44100; // per second
 const samplesPerChunk = sampleRate / 40;
-const samples = len * samplesPerChunk;
-const buffer = new Float32Array(samples);
+const samples: number[] = [];
 
-function chunk(sample: number, base: number, max: number, channels: ((s: number, b: number) => number)[]) {
-  const t = sample + samplesPerChunk;
+function chunks(sample: number, base: number, max: number, count: number, channels: ((s: number, b: number) => number)[]) {
+  const t = sample + samplesPerChunk * count;
   for (; sample < t; sample++) {
-    buffer[sample] = max * channels.reduce((a, c) => a + c(sample, base), 0);
+    samples[sample] = max * channels.reduce((a, c) => a + c(sample, base), 0);
   }
-  return t;
+  return sample;
 }
 
 function sawtooth(m: number) {
-  return (s: number, b: number) => (2/7) * (((s * m / sampleRate) % b) / b - 0.5);
+  // 2(t/p - floor[1/2+t/p]);
+  return (t: number, b: number) => {
+    const p = sampleRate / (b * m);
+    return (1/4) * 2 * (t/p - Math.floor(0.5 + t/p));
+  };
 }
 
-const v_channel = (s: number, b: number) => (3/7) * Math.sin(s * b * 2 * Math.PI / sampleRate);
+const v_channel = (s: number, b: number) => (1/2) * Math.sin(s * b * 2 * Math.PI / sampleRate);
 const a_channel = sawtooth(4/3);
 const o_channel = sawtooth(3/2);
 const u_channel = sawtooth(5/3);
 const i_channel = sawtooth(2);
+
+const epenthetics = {
+  e: [],
+  a: [a_channel],
+  o: [o_channel],
+  u: [u_channel],
+  i: [i_channel],
+};
 
 const base = 110; // Hz
 let sample = 0;
@@ -156,78 +143,57 @@ for (const syl of syls) {
                     syl.C === 'd' ? [o_channel, i_channel] :
                     syl.C === 'g' ? [o_channel, u_channel] :
                     /*syl.C === 'c' ?*/ [u_channel, i_channel];
-  const vcons = [v_channel, ...consonant];
+
   const vowel = syl.V === 'a' ? a_channel :
                 syl.V === 'o' ? o_channel :
                 syl.V === 'u' ? u_channel :
                 /*syl.V === 'i' ?*/i_channel;
   if (syl.v_delay) {
     // insert consonant formants without voice bar for 2 chunks
-    sample = chunk(sample, base, max, consonant)
-    sample = chunk(sample, base, max, consonant)
+    sample = chunks(sample, base, max, 2, consonant);
   }
   switch(syl.type) {
     case 1:
-      // insert 3 chunks of consonant with voicing
-      sample = chunk(sample, base, max, vcons);
-      sample = chunk(sample, base, max, vcons);
-      sample = chunk(sample, base, max, vcons);
+      // insert 3 or 5 chunks of consonant with voicing
       // and 3 chunks of consonant without voicing
-      sample = chunk(sample, base, max, consonant);
-      sample = chunk(sample, base, max, consonant);
-      sample = chunk(sample, base, max, consonant);
+      sample = chunks(sample, base, max, syl.geminate ? 3 : 5, [v_channel, ...consonant]);
+      sample = chunks(sample, base, max, 3, consonant);
       break;
     case 2:
-      // insert 3 chunks of consonant with voicing
-      sample = chunk(sample, base, max, vcons);
-      sample = chunk(sample, base, max, vcons);
-      sample = chunk(sample, base, max, vcons);
-      // and 3 chunks of vowel with voicing
-      sample = chunk(sample, base, max, [v_channel, vowel]);
-      sample = chunk(sample, base, max, [v_channel, vowel]);
-      sample = chunk(sample, base, max, [v_channel, vowel]);
+      {
+        const l = syl.geminate ? 4 : 3;
+        // insert equal-length chunks of consonant and vowel with voicing
+        sample = chunks(sample, base, max, l, [v_channel, ...consonant]);
+        sample = chunks(sample, base, max, l, [v_channel, vowel]);
+      }
       break;
     case 3:
-      // insert 2 chunks of consonant with voicing
-      sample = chunk(sample, base, max, vcons);
-      sample = chunk(sample, base, max, vcons);
+      // insert 2 or 4 chunks of consonant with voicing
       // and 2 chunks of consonant without voicing
-      sample = chunk(sample, base, max, consonant);
-      sample = chunk(sample, base, max, consonant);
       // and 2 chunks of vowel without voicing
-      sample = chunk(sample, base, max, [vowel]);
-      sample = chunk(sample, base, max, [vowel]);
+      sample = chunks(sample, base, max, syl.geminate ? 4 : 2, [v_channel, ...consonant]);
+      sample = chunks(sample, base, max, 2, consonant);
+      sample = chunks(sample, base, max, 2, [vowel]);
       break;
     case 4:
-      // insert 2 chunks of consonant with voicing
-      sample = chunk(sample, base, max, vcons);
-      sample = chunk(sample, base, max, vcons);
-      // and 2 chunks of vowel with voicing
-      sample = chunk(sample, base, max, [v_channel, vowel]);
-      sample = chunk(sample, base, max, [v_channel, vowel]);
+      {
+        const l = syl.geminate ? 3 : 2;
+        // insert equal-length chunks of consonant and vowel with voicing
+        sample = chunks(sample, base, max, l, [v_channel, ...consonant]);
+        sample = chunks(sample, base, max, l, [v_channel, vowel]);
+      }
       // and 2 chunks of vowel without voicing
-      sample = chunk(sample, base, max, [vowel]);
-      sample = chunk(sample, base, max, [vowel]);
+      sample = chunks(sample, base, max, 2, [vowel]);
       break;
   }
-  switch (syl.epenthetic) {
-    case '': break;
-    case 'e': sample = chunk(sample, base, max, []);
-      break;
-    case 'a': sample = chunk(sample, base, max, [a_channel]);
-      break;
-    case 'o': sample = chunk(sample, base, max, [o_channel]);
-      break;
-    case 'u': sample = chunk(sample, base, max, [u_channel]);
-      break;
-    case 'i': sample = chunk(sample, base, max, [i_channel]);
-      break;
+  if (syl.epenthetic) {
+    sample = chunks(sample, base, max, 1, epenthetics[syl.epenthetic]);
   }
 }
 
 WavEncoder.encode({
   sampleRate,
-  channelData: [buffer],
+  channelData: [new Float32Array(samples)],
 }).then((buffer) => {
   fs.writeFileSync("noise.wav", new Uint8Array(buffer));
 });
